@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gdamore/tcell"
+	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 )
 
@@ -41,11 +41,19 @@ func getYearAndRace(input string) (string, string, error) {
 	return fullYear, raceNumber, nil
 }
 
+func (session *viewerSession) logErrorf(format string, v ...interface{}) {
+	session.logError(fmt.Sprintf(format, v...))
+}
+
 func (session *viewerSession) logError(v ...interface{}) {
 	if session.textWindow != nil {
 		fmt.Fprintln(session.textWindow, fmt.Sprintf("[%s::b]ERROR:[-::-]", colortoHexString(activeTheme.ErrorColor)), fmt.Sprint(v...))
 	}
 	log.Println("[ERROR]", fmt.Sprint(v...))
+}
+
+func (session *viewerSession) logInfof(format string, v ...interface{}) {
+	session.logInfo(fmt.Sprintf(format, v...))
 }
 
 func (session *viewerSession) logInfo(v ...interface{}) {
@@ -55,41 +63,49 @@ func (session *viewerSession) logInfo(v ...interface{}) {
 	log.Println("[INFO]", fmt.Sprint(v...))
 }
 
-func (session *viewerSession) withBlink(node *tview.TreeNode, fn func()) func() {
+func (session *viewerSession) withBlink(node *tview.TreeNode, fn func(), after func()) func() {
 	return func() {
 		done := make(chan struct{})
 		go func() {
 			fn()
 			done <- struct{}{}
 		}()
-		go session.blinkNode(node, done)
+		go func() {
+			session.blinkNode(node, done)
+			if after != nil {
+				after()
+			}
+		}()
 	}
 }
 
 func (session *viewerSession) blinkNode(node *tview.TreeNode, done chan struct{}) {
 	originalText := node.GetText()
 	originalColor := node.GetColor()
+	color1 := originalColor
+	color2 := activeTheme.LoadingColor
 	node.SetText("loading...")
+
+	ticker := time.NewTicker(200 * time.Millisecond)
 	for {
 		select {
 		case <-done:
 			node.SetText(originalText)
-			session.app.Draw()
-			return
-		default:
-			node.SetColor(activeTheme.LoadingColor)
-			session.app.Draw()
-			time.Sleep(200 * time.Millisecond)
 			node.SetColor(originalColor)
 			session.app.Draw()
-			time.Sleep(200 * time.Millisecond)
+			return
+		case <-ticker.C:
+			node.SetColor(color2)
+			session.app.Draw()
+			c := color1
+			color1 = color2
+			color2 = c
 		}
 	}
 }
 
 func hexStringToColor(hex string) tcell.Color {
 	hex = strings.ReplaceAll(hex, "#", "")
-	//TODO: check err?
 	color, _ := strconv.ParseInt(hex, 16, 32)
 	return tcell.NewHexColor(int32(color))
 }
@@ -116,6 +132,8 @@ func (t theme) apply() {
 	}
 	if t.BackgroundColor != "" {
 		tview.Styles.PrimitiveBackgroundColor = hexStringToColor(t.BackgroundColor)
+	} else {
+		tview.Styles.PrimitiveBackgroundColor = tcell.ColorDefault
 	}
 	if t.BorderColor != "" {
 		tview.Styles.BorderColor = hexStringToColor(t.BorderColor)
@@ -143,6 +161,9 @@ func (t theme) apply() {
 	}
 	if t.ErrorColor != "" {
 		activeTheme.ErrorColor = hexStringToColor(t.ErrorColor)
+	}
+	if t.MultiCommandColor != "" {
+		activeTheme.MultiCommandColor = hexStringToColor(t.MultiCommandColor)
 	}
 }
 

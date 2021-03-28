@@ -3,10 +3,11 @@ package main
 import (
 	"errors"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/gdamore/tcell"
+	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 	"github.com/stretchr/testify/assert"
 )
@@ -90,22 +91,39 @@ loading...┌────────┐
 	node := tview.NewTreeNode(originalText)
 	node.SetColor(originalColor)
 
-	simScreen, s := newTestApp(20, 5)
+	simScreen, s := newTestApp(t, 20, 5)
 	s.tree.GetRoot().AddChild(node)
-	go s.app.Run()
+	go func() {
+		err := s.app.Run()
+		assert.NoError(t, err)
+	}()
 
 	go s.withBlink(node, func() {
 		time.Sleep(time.Millisecond * 200)
-	})()
+	}, nil)()
 
 	time.Sleep(time.Millisecond * 100)
 	assert.Equal(t, loadingScreen, toTextScreen(simScreen))
 
-	time.Sleep(time.Millisecond * 1000)
+	time.Sleep(time.Millisecond * 200)
 
 	assert.Equal(t, originalScreen, toTextScreen(simScreen))
 	assert.Equal(t, originalColor, node.GetColor())
 	assert.Equal(t, originalText, node.GetText())
+
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	go s.withBlink(node,
+		func() {},
+		// after function should be executed after the node is restored
+		func() {
+			assert.Equal(t, originalScreen, toTextScreen(simScreen))
+			assert.Equal(t, originalColor, node.GetColor())
+			assert.Equal(t, originalText, node.GetText())
+			wg.Done()
+		})()
+	wg.Wait()
 }
 
 func TestGetYearAndRace(t *testing.T) {
@@ -149,8 +167,11 @@ func TestLog(t *testing.T) {
                │             │
                └─────────────┘`
 
-	simScreen, s := newTestApp(30, 5)
-	go s.app.Run()
+	simScreen, s := newTestApp(t, 30, 5)
+	go func() {
+		err := s.app.Run()
+		assert.NoError(t, err)
+	}()
 	s.logInfo("info")
 	time.Sleep(time.Millisecond * 100)
 	assert.Equal(t, expectedInfo, toTextScreen(simScreen))
@@ -174,9 +195,10 @@ func toTextScreen(screen tcell.SimulationScreen) string {
 	return content
 }
 
-func newTestApp(x, y int) (tcell.SimulationScreen, viewerSession) {
+func newTestApp(t *testing.T, x, y int) (tcell.SimulationScreen, viewerSession) {
 	simScreen := tcell.NewSimulationScreen("UTF-8")
-	simScreen.Init()
+	err := simScreen.Init()
+	assert.NoError(t, err)
 	simScreen.SetSize(x, y)
 
 	app := tview.NewApplication()

@@ -1,17 +1,19 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"log"
 	"os"
 	"os/signal"
+	"path"
 	"syscall"
 	"time"
 
 	"github.com/SoMuchForSubtlety/keyring"
-	"github.com/gdamore/tcell"
+	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
-	"gopkg.in/alecthomas/kingpin.v2"
+	"github.com/skratchdot/open-golang/open"
 )
 
 var activeTheme = struct {
@@ -21,6 +23,7 @@ var activeTheme = struct {
 	ActionNodeColor     tcell.Color
 	LoadingColor        tcell.Color
 	LiveColor           tcell.Color
+	MultiCommandColor   tcell.Color
 	UpdateColor         tcell.Color
 	NoContentColor      tcell.Color
 	InfoColor           tcell.Color
@@ -34,6 +37,7 @@ var activeTheme = struct {
 	ActionNodeColor:     tcell.ColorDarkCyan,
 	LoadingColor:        tcell.ColorDarkCyan,
 	LiveColor:           tcell.ColorRed,
+	MultiCommandColor:   tcell.ColorAquaMarine,
 	UpdateColor:         tcell.ColorDarkRed,
 	NoContentColor:      tcell.ColorOrangeRed,
 	InfoColor:           tcell.ColorGreen,
@@ -53,6 +57,8 @@ type viewerSession struct {
 	app        *tview.Application
 	textWindow *tview.TextView
 	tree       *tview.TreeView
+
+	commands []command
 }
 
 var (
@@ -62,14 +68,46 @@ var (
 )
 
 func main() {
-	app := kingpin.New("f1viewer", "a TUI client for F1TV")
-	app.Version(buildVersion(version, commit, date))
-	app.VersionFlag.Short('v')
-	app.HelpFlag.Short('h')
+	var showVersion bool
+	var openConfig bool
+	var openLogs bool
+	flag.BoolVar(&showVersion, "v", showVersion, "show version information")
+	flag.BoolVar(&showVersion, "version", showVersion, "show version information")
+	flag.BoolVar(&openConfig, "config", openConfig, "open config file")
+	flag.BoolVar(&openLogs, "logs", openLogs, "open logs directory")
+	flag.Parse()
+	if showVersion {
+		fmt.Println(buildVersion())
+		return
+	}
+	cfg, err := loadConfig()
+	if err != nil {
+		log.Fatalf("Could not open config: %v", err)
+	}
+	if openConfig {
+		cfgPath, err := getConfigPath()
+		if err != nil {
+			log.Fatal(err)
+		}
+		err = open.Start(path.Join(cfgPath, "config.json"))
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	if openLogs {
+		logPath, err := getLogPath(cfg)
+		if err != nil {
+			log.Fatal(err)
+		}
+		err = open.Start(logPath)
+		if err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
 
-	kingpin.MustParse(app.Parse(os.Args[1:]))
-
-	session, logfile, err := newSession()
+	session, logfile, err := newSession(cfg)
 	defer logfile.Close()
 	if err != nil {
 		fmt.Println("[ERROR]", err)
@@ -82,6 +120,7 @@ func main() {
 		os.Exit(0)
 	}()
 
+	go session.loadCommands()
 	go session.checkLive()
 	go session.CheckUpdate()
 
@@ -95,19 +134,27 @@ func main() {
 		session.app.Draw()
 	}
 
+	logOutNode := tview.NewTreeNode("Log Out").
+		SetReference(&NodeMetadata{nodeType: ActionNode}).
+		SetColor(activeTheme.ActionNodeColor)
+	logOutNode.SetSelectedFunc(func() {
+		session.logout()
+		session.initUIWithForm()
+	})
+	session.tree.GetRoot().AddChild(logOutNode)
+
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 
 	<-c
+
+	session.app.Stop()
 }
 
-func newSession() (*viewerSession, *os.File, error) {
+func newSession(cfg config) (*viewerSession, *os.File, error) {
 	var err error
-	session := &viewerSession{}
-
-	session.cfg, err = loadConfig()
-	if err != nil {
-		return nil, nil, fmt.Errorf("Could not open config: %w", err)
+	session := &viewerSession{
+		cfg: cfg,
 	}
 
 	logFile, err := configureLogging(session.cfg)
@@ -126,17 +173,21 @@ func newSession() (*viewerSession, *os.File, error) {
 	}
 
 	session.app = tview.NewApplication()
+	session.app.EnableMouse(true)
 
 	root := tview.NewTreeNode("Categories").SetSelectable(false)
-	root.AddChild(session.getFullSessionsNode())
+	root.AddChild(session.getSeasonsNode())
 	session.tree = tview.NewTreeView().
 		SetRoot(root).
 		SetCurrentNode(root).
 		SetTopLevel(1)
 
+	// refresh supported nodes on 'r' key press or quit on 'q'
+	session.tree.SetInputCapture(session.treeInputHanlder)
+
 	session.textWindow = tview.NewTextView().
 		SetWordWrap(false).
-		SetWrap(false).
+		SetWrap(session.cfg.TerminalWrap).
 		SetDynamicColors(true).
 		SetChangedFunc(func() { session.app.Draw() })
 	session.textWindow.SetBorder(true)
@@ -156,12 +207,48 @@ func newSession() (*viewerSession, *os.File, error) {
 }
 
 func (session *viewerSession) initUIWithForm() {
-
+	session.authtoken = ""
 	form := tview.NewForm().
-		AddInputField("username", session.username, 30, nil, session.updateUsername).
+		AddInputField("email", session.username, 30, nil, session.updateUsername).
 		AddPasswordField("password", "", 30, '*', session.updatePassword).
 		AddButton("test", session.testAuth).
-		AddButton("save", session.closeForm)
+		AddButton("save", session.closeForm).
+		AddButton("log in skylark token", session.initUIWithTokenForm)
+
+	formTreeFlex := tview.NewFlex()
+	if !session.cfg.HorizontalLayout {
+		formTreeFlex.SetDirection(tview.FlexRow)
+	}
+
+	if session.cfg.HorizontalLayout {
+		formTreeFlex.
+			AddItem(form, 50, 0, true).
+			AddItem(session.tree, 0, 1, false)
+	} else {
+		formTreeFlex.
+			AddItem(form, 7, 0, true).
+			AddItem(session.tree, 0, 1, false)
+	}
+
+	masterFlex := tview.NewFlex()
+	if session.cfg.HorizontalLayout {
+		masterFlex.SetDirection(tview.FlexRow)
+	}
+
+	masterFlex.
+		AddItem(formTreeFlex, 0, session.cfg.TreeRatio, true).
+		AddItem(session.textWindow, 0, session.cfg.OutputRatio, false)
+
+	session.app.SetRoot(masterFlex, true)
+}
+
+func (session *viewerSession) initUIWithTokenForm() {
+	session.authtoken = ""
+	form := tview.NewForm().
+		AddInputField("skylarkToken", "", 70, nil, session.updateToken).
+		AddButton("test", session.testAuth).
+		AddButton("save", session.closeForm).
+		AddButton("log in email & password", session.initUIWithForm)
 
 	formTreeFlex := tview.NewFlex()
 	if !session.cfg.HorizontalLayout {
@@ -236,7 +323,7 @@ func (session *viewerSession) checkLive() {
 	}
 }
 
-func buildVersion(version, commit, date string) string {
+func buildVersion() string {
 	result := fmt.Sprintf("Version:     %s", version)
 	if commit != "" {
 		result += fmt.Sprintf("\nGit commit:  %s", commit)

@@ -1,18 +1,23 @@
 project_name: f1viewer
 builds:
-  - 
+  - id: windows
+    goos:
+      - windows
+    goarch:
+      - amd64
+  - id: linux
     goos:
       - linux
-      - windows
+    goarch:
+      - amd64
+  - id: mac
+    goos:
       - darwin
     goarch:
       - amd64
-      - 386
+      - arm64
 archives:
-  -
-    replacements:
-      amd64: 64-bit
-      386: 32-bit
+  - replacements:
       darwin: macOS
     format_overrides:
       - goos: windows
@@ -24,31 +29,24 @@ snapshot:
 changelog:
   skip: true
 nfpms:
-  -
-    description: TUI client for F1TV
+  - description: TUI client for F1TV
     license: GPL-3.0-only
     homepage: https://github.com/SoMuchForSubtlety/f1viewer/
     maintainer: SoMuchForSubtlety <s0muchfrsubtlety@gmail.com>
-    replacements:
-      darwin: macOS
     formats:
       - deb
       - rpm
-    dependencies:
-      - mpv
     recommends:
       - xclip
-# does not work due to cgo not being supported by goreleaser
-# brews:
-#   -
-#     description: TUI client for F1TV
-#     homepage: https://github.com/SoMuchForSubtlety/f1viewer/
-#     folder: Formula
-#     github:
-#       owner: SoMuchForSubtlety
-#       name: homebrew-tap
-#     commit_author:
-#       name: goreleaserbot
-#       email: goreleaser@carlosbecker.com
-#     dependencies:
-#       - mpv
+      - mpv
+      - vlc
+brews:
+  - description: TUI client for F1TV
+    homepage: https://github.com/SoMuchForSubtlety/f1viewer/
+    folder: Formula
+    tap:
+      owner: SoMuchForSubtlety
+      name: homebrew-tap
+    commit_author:
+      name: goreleaserbot
+      email: goreleaser@carlosbecker.com
